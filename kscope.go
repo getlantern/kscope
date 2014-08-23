@@ -6,14 +6,14 @@ import (
 
 type KScope struct {
 	Deliver    func(id string, payload interface{})
-	Reaches    []float64
+	Spreads    []float64
 	nodes      map[nodeid]*node
 	nodesMutex sync.Mutex
 }
 
 func (kscope *KScope) Start() {
-	if kscope.Reaches == nil {
-		kscope.Reaches = DEFAULT_REACHES
+	if kscope.Spreads == nil {
+		kscope.Spreads = DEFAULT_SPREADS
 	}
 	kscope.nodes = make(map[nodeid]*node)
 }
@@ -28,11 +28,11 @@ func (kscope *KScope) Untrust(truster string, trustee string) {
 
 func (kscope *KScope) Advertise(node string, payload interface{}) {
 	origin := nodeid(node)
-	src := sourceFor(origin, origin)
 	ad := &ad{
-		src:     src,
-		degree:  0,
-		payload: payload,
+		origin:    origin,
+		forwarder: origin,
+		degree:    0,
+		payload:   payload,
 	}
 	kscope.nodeFor(origin).ad(ad)
 }

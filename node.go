@@ -19,7 +19,7 @@ type node struct {
 	untrustedCh   chan nodeid
 	resetRoutesCh chan interface{}
 	adCh          chan *ad
-	routes        map[source][]nodeid
+	routes        map[nodeid][]nodeid
 }
 
 func newNode(kscope *KScope, id nodeid) *node {
@@ -31,7 +31,7 @@ func newNode(kscope *KScope, id nodeid) *node {
 		untrustedCh:   make(chan nodeid, NODE_CHANNEL_DEPTH),
 		resetRoutesCh: make(chan interface{}, NODE_CHANNEL_DEPTH),
 		adCh:          make(chan *ad, NODE_CHANNEL_DEPTH),
-		routes:        make(map[source][]nodeid),
+		routes:        make(map[nodeid][]nodeid),
 	}
 }
 
@@ -71,23 +71,24 @@ func (node *node) processTrusted(id nodeid) {
 }
 
 func (node *node) processUntrusted(id nodeid) {
-	t := node.trusted
-	for i, trustedId := range t {
-		if id == trustedId {
-			copy(t[i:], t[i+1:])
-			t[len(t)-1] = ""
-			node.trusted = t[:len(t)-1]
-			return
+	node.trusted = removeFrom(node.trusted, id)
+	for src, dests := range node.routes {
+		if src == id {
+			// Remove all routes from the untrusted node
+			delete(node.routes, id)
+		} else {
+			// Remove any routes to the untrusted node
+			node.routes[id] = removeFrom(dests, id)
 		}
 	}
 }
 
 func (node *node) processResetRoutes() {
-	node.routes = make(map[source][]nodeid)
+	node.routes = make(map[nodeid][]nodeid)
 }
 
 func (node *node) processAd(ad *ad) {
-	if !node.trusts(ad.src.forwarder()) {
+	if !node.trusts(ad.forwarder) {
 		return
 	}
 	node.deliverAd(ad)
@@ -95,13 +96,13 @@ func (node *node) processAd(ad *ad) {
 }
 
 func (node *node) deliverAd(ad *ad) {
-	if node.id != ad.src.forwarder() && node.id != ad.src.origin() {
+	if node.id != ad.forwarder && node.id != ad.origin {
 		node.kscope.deliverAd(node.id, ad)
 	}
 }
 
 func (node *node) forwardAd(a *ad) {
-	if a.degree >= len(node.kscope.Reaches) {
+	if a.degree >= len(node.kscope.Spreads) {
 		// Maximum degree reached, do not forward
 		return
 	}
@@ -109,34 +110,38 @@ func (node *node) forwardAd(a *ad) {
 	destinations := node.destinationsFor(a)
 
 	forwardedAd := &ad{
-		src:     sourceFor(a.src.origin(), node.id),
-		degree:  a.degree + 1,
-		payload: a.payload,
+		origin:    a.origin,
+		forwarder: node.id,
+		degree:    a.degree + 1,
+		payload:   a.payload,
 	}
+
 	for _, destination := range destinations {
 		node.kscope.nodeFor(destination).ad(forwardedAd)
 	}
 }
 
 func (node *node) destinationsFor(ad *ad) []nodeid {
-	destinations := node.routes[ad.src]
-	if destinations == nil {
-		destinations = make([]nodeid, 0)
-	}
+	destinations := node.routes[ad.forwarder]
 
-	// Don't bother forwarding ad to origin or forwarder
-	nodeids := idsWithout(node.trusted, ad.src.forwarder())
-	nodeids = idsWithout(nodeids, ad.src.origin())
+	// Don't even send ad to forwarder
+	nodeids := removeFrom(node.trusted, ad.forwarder)
 
-	// Figure out how many destinations to forward to based on reach
-	reach := node.kscope.Reaches[ad.degree]
-	if reach == 1 {
+	// Figure out how many destinations to forward to based on spread
+	spread := node.kscope.Spreads[ad.degree]
+	if spread == 1 {
+		// Send to all trusted nodes other than forwarder
 		destinations = nodeids
 	} else {
-		n := int(math.Ceil(reach * float64(len(nodeids))))
+		if destinations == nil {
+			destinations = make([]nodeid, 0)
+		}
+
+		n := int(math.Ceil(spread * float64(len(nodeids))))
 
 		// Add random destinations until we've reached desired size
 		dn := n - len(destinations)
+
 		for i := 0; i < dn; i++ {
 			r := len(nodeids) - 1
 			if r == 0 {
@@ -144,13 +149,13 @@ func (node *node) destinationsFor(ad *ad) []nodeid {
 				break
 			}
 			randomDestination := nodeids[RAND.Intn(r)]
-			nodeids = idsWithout(nodeids, randomDestination)
+			nodeids = removeFrom(nodeids, randomDestination)
 			destinations = append(destinations, randomDestination)
 		}
 	}
 
 	// Remember destinations for later
-	node.routes[ad.src] = destinations
+	node.routes[ad.forwarder] = destinations
 	return destinations
 }
 
@@ -167,16 +172,14 @@ func (node *node) trusts(id nodeid) bool {
 	return false
 }
 
-func idsWithout(nodeids []nodeid, id nodeid) []nodeid {
-	result := make([]nodeid, len(nodeids))
-	skipped := 0
-	for i, trustedId := range nodeids {
-		if id == trustedId {
-			skipped = skipped + 1
-		} else {
-			result[i-skipped] = trustedId
+func removeFrom(nodeids []nodeid, id nodeid) []nodeid {
+	for i, existingId := range nodeids {
+		if id == existingId {
+			result := make([]nodeid, len(nodeids)-1)
+			copy(result, nodeids[:i])
+			copy(result[i:], nodeids[i+1:])
+			return result
 		}
-
 	}
-	return result[:len(result)-skipped]
+	return nodeids
 }
